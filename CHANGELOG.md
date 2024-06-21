@@ -1,9 +1,15 @@
 # next (unreleased)
-* Bump flake8, flake8-comprehensions and flake8-bugbear (Sebastian Csar, #341).
+
+* Use `ruff` for linting (Anh Trinh, #347).
+* Use `ruff` for formatting (Anh Trinh, #349).
+* Replace `tox` by `pre-commit` for linting and formatting (Anh Trinh, #349).
+* Add `--config` flag to specify path to pyproject.toml configuration file (Glen Robertson #352).
+
+# 2.11 (2024-01-06)
+
 * Switch to tomllib/tomli to support heterogeneous arrays (Sebastian Csar, #340).
-* Provide whitelist parity for `MagicMock` and `Mock` (maxrake).
-* Use .gitignore to exclude files if --exclude is missing from both pyproject.toml and the command line (whosayn, #344, #345).
-* Properly detect when no .gitignore is present (travisdart, #346).
+* Bump flake8, flake8-comprehensions and flake8-bugbear (Sebastian Csar, #341).
+* Provide whitelist parity for `MagicMock` and `Mock` (maxrake, #342).
 
 # 2.10 (2023-10-06)
 
