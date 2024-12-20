@@ -1,17 +1,17 @@
 import ast
-from fnmatch import fnmatch, fnmatchcase
-from pathlib import Path
 import pkgutil
 import re
 import string
 import sys
+from fnmatch import fnmatch, fnmatchcase
+from functools import partial
+from pathlib import Path
+from typing import List
 
-from vulture import lines
-from vulture import noqa
-from vulture import utils
+from vulture import lines, noqa, utils
 from vulture.config import InputError, make_config
+from vulture.reachability import Reachability
 from vulture.utils import ExitCode
-
 
 DEFAULT_CONFIDENCE = 60
 
@@ -139,13 +139,13 @@ class Item:
         message="",
         confidence=DEFAULT_CONFIDENCE,
     ):
-        self.name = name
-        self.typ = typ
-        self.filename = filename
-        self.first_lineno = first_lineno
-        self.last_lineno = last_lineno
-        self.message = message or f"unused {typ} '{name}'"
-        self.confidence = confidence
+        self.name: str = name
+        self.typ: str = typ
+        self.filename: Path = filename
+        self.first_lineno: int = first_lineno
+        self.last_lineno: int = last_lineno
+        self.message: str = message or f"unused {typ} '{name}'"
+        self.confidence: int = confidence
 
     @property
     def size(self):
@@ -158,12 +158,9 @@ class Item:
             size_report = f", {self.size:d} {line_format}"
         else:
             size_report = ""
-        return "{}:{:d}: {} ({}% confidence{})".format(
-            utils.format_path(self.filename),
-            self.first_lineno,
-            self.message,
-            self.confidence,
-            size_report,
+        return (
+            f"{utils.format_path(self.filename)}:{self.first_lineno:d}: "
+            f"{self.message} ({self.confidence}% confidence{size_report})"
         )
 
     def get_whitelist_string(self):
@@ -174,8 +171,9 @@ class Item:
             prefix = ""
             if self.typ in ["attribute", "method", "property"]:
                 prefix = "_."
-            return "{}{}  # unused {} ({}:{:d})".format(
-                prefix, self.name, self.typ, filename, self.first_lineno
+            return (
+                f"{prefix}{self.name}  # unused {self.typ} "
+                f"({filename}:{self.first_lineno:d})"
             )
 
     def _tuple(self):
@@ -219,6 +217,14 @@ class Vulture(ast.NodeVisitor):
         self.filename = Path()
         self.code = []
         self.exit_code = ExitCode.NoDeadCode
+        self.noqa_lines = {}
+
+        report = partial(
+            self._define,
+            collection=self.unreachable_code,
+            confidence=100,
+        )
+        self.reachability = Reachability(report=report)
 
     def scan(self, code, filename=""):
         filename = Path(filename)
@@ -255,6 +261,10 @@ class Vulture(ast.NodeVisitor):
                 self.visit(node)
             except SyntaxError as err:
                 handle_syntax_error(err)
+
+        # Reset the reachability internals for every module to reduce memory
+        # usage.
+        self.reachability.reset()
 
     def scavenge(self, paths, exclude=None):
         def prepare_pattern(pattern):
@@ -300,10 +310,13 @@ class Vulture(ast.NodeVisitor):
                 except OSError:
                     # Most imported modules don't have a whitelist.
                     continue
+                assert module_data is not None
                 module_string = module_data.decode("utf-8")
                 self.scan(module_string, filename=path)
 
-    def get_unused_code(self, min_confidence=0, sort_by_size=False):
+    def get_unused_code(
+        self, min_confidence=0, sort_by_size=False
+    ) -> List[Item]:
         """
         Return ordered list of unused Item objects.
         """
@@ -411,47 +424,6 @@ class Vulture(ast.NodeVisitor):
             )
             if alias is not None:
                 self.used_names.add(name_and_alias.name)
-
-    def _handle_conditional_node(self, node, name):
-        if utils.condition_is_always_false(node.test):
-            self._define(
-                self.unreachable_code,
-                name,
-                node,
-                last_node=node.body
-                if isinstance(node, ast.IfExp)
-                else node.body[-1],
-                message=f"unsatisfiable '{name}' condition",
-                confidence=100,
-            )
-        elif utils.condition_is_always_true(node.test):
-            else_body = node.orelse
-            if name == "ternary":
-                self._define(
-                    self.unreachable_code,
-                    name,
-                    else_body,
-                    message="unreachable 'else' expression",
-                    confidence=100,
-                )
-            elif else_body:
-                self._define(
-                    self.unreachable_code,
-                    "else",
-                    else_body[0],
-                    last_node=else_body[-1],
-                    message="unreachable 'else' block",
-                    confidence=100,
-                )
-            elif name == "if":
-                # Redundant if-condition without else block.
-                self._define(
-                    self.unreachable_code,
-                    name,
-                    node,
-                    message="redundant if-condition",
-                    confidence=100,
-                )
 
     def _define(
         self,
@@ -625,12 +597,6 @@ class Vulture(ast.NodeVisitor):
                 self.defined_funcs, node.name, node, ignore=_ignore_function
             )
 
-    def visit_If(self, node):
-        self._handle_conditional_node(node, "if")
-
-    def visit_IfExp(self, node):
-        self._handle_conditional_node(node, "ternary")
-
     def visit_Import(self, node):
         self._add_aliases(node)
 
@@ -654,14 +620,16 @@ class Vulture(ast.NodeVisitor):
                 if utils.is_ast_string(elt):
                     self.used_names.add(elt.value)
 
-    def visit_While(self, node):
-        self._handle_conditional_node(node, "while")
-
     def visit_MatchClass(self, node):
         for kwd_attr in node.kwd_attrs:
             self.used_names.add(kwd_attr)
 
     def visit(self, node):
+        # Visit children nodes first to allow recursive reachability analysis.
+        self.generic_visit(node)
+
+        self.reachability.visit(node)
+
         method = "visit_" + node.__class__.__name__
         visitor = getattr(self, method, None)
         if self.verbose:
@@ -684,36 +652,10 @@ class Vulture(ast.NodeVisitor):
                 ast.parse(type_comment, filename="<type_comment>", mode=mode)
             )
 
-        return self.generic_visit(node)
-
-    def _handle_ast_list(self, ast_list):
-        """
-        Find unreachable nodes in the given sequence of ast nodes.
-        """
-        for index, node in enumerate(ast_list):
-            if isinstance(
-                node, (ast.Break, ast.Continue, ast.Raise, ast.Return)
-            ):
-                try:
-                    first_unreachable_node = ast_list[index + 1]
-                except IndexError:
-                    continue
-                class_name = node.__class__.__name__.lower()
-                self._define(
-                    self.unreachable_code,
-                    class_name,
-                    first_unreachable_node,
-                    last_node=ast_list[-1],
-                    message=f"unreachable code after '{class_name}'",
-                    confidence=100,
-                )
-                return
-
     def generic_visit(self, node):
         """Called if no explicit visitor function exists for a node."""
         for _, value in ast.iter_fields(node):
             if isinstance(value, list):
-                self._handle_ast_list(value)
                 for item in value:
                     if isinstance(item, ast.AST):
                         self.visit(item)
