@@ -193,7 +193,7 @@ class Vulture(ast.NodeVisitor):
     """Find dead code."""
 
     def __init__(
-        self, verbose=False, ignore_names=None, ignore_decorators=None
+        self, verbose=False, ignore_names=None, ignore_decorators=None, vertex_callback=None, edge_callback=None
     ):
         self.verbose = verbose
 
@@ -213,6 +213,9 @@ class Vulture(ast.NodeVisitor):
 
         self.ignore_names = ignore_names or []
         self.ignore_decorators = ignore_decorators or []
+
+        self.vertex_callback = vertex_callback
+        self.edge_callback = edge_callback
 
         self.filename = Path()
         self.code = []
@@ -497,6 +500,9 @@ class Vulture(ast.NodeVisitor):
             self.used_names |= set(re.findall(r"%\((\w+)\)", node.left.value))
 
     def visit_Call(self, node):
+        # Outgoing to another function:
+        print("node.func.id:", node.func.id)
+        
         # Count getattr/hasattr(x, "some_attr", ...) as usage of some_attr.
         if isinstance(node.func, ast.Name) and (
             (node.func.id == "getattr" and 2 <= len(node.args) <= 3)
@@ -632,10 +638,14 @@ class Vulture(ast.NodeVisitor):
 
         method = "visit_" + node.__class__.__name__
         visitor = getattr(self, method, None)
+
+        lineno = getattr(node, "lineno", 1)
+        line = self.code[lineno - 1] if self.code else ""
         if self.verbose:
-            lineno = getattr(node, "lineno", 1)
-            line = self.code[lineno - 1] if self.code else ""
             self._log(lineno, ast.dump(node), line)
+
+        print("method:", method, getattr(node, "name", None), lineno, line)
+
         if visitor:
             visitor(node)
 
@@ -663,6 +673,14 @@ class Vulture(ast.NodeVisitor):
                 self.visit(value)
 
 
+def vertex_callback(*args, **kwargs):
+    print("vertex_callback", args, kwargs)
+
+
+def edge_callback(*args, **kwargs):
+    print("edge_callback", args, kwargs)
+
+
 def main():
     try:
         config = make_config()
@@ -674,6 +692,8 @@ def main():
         verbose=config["verbose"],
         ignore_names=config["ignore_names"],
         ignore_decorators=config["ignore_decorators"],
+        vertex_callback=vertex_callback,
+        edge_callback=edge_callback,
     )
     vulture.scavenge(config["paths"], exclude=config["exclude"])
     sys.exit(

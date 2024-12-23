@@ -11,3 +11,5 @@ vulture.egg-info/
 .tox/
 .venv/
 .vscode/
+.idea/
+*.egg-info/
